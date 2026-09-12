@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files (Python)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# LaTeX (Archivos temporales de compilacion del Paper)
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.bbl
+*.blg
+
+# Microcontrolador / IDE (VSCode, C++ / Pico SDK)
+.vscode/
+build/
+*.bin
+*.elf
+*.uf2
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db
