@@ -1,16 +1,18 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Función para generar un chirp lineal que detecta el eco de un objeto a cierta distancia
 def generar_chirp(f0, f1, T, fs):
-    """
-    Genera un chirp lineal que va desde la frecuencia f0 hasta f1 en un tiempo T.
-    """
-    t = np.linspace(0, T, int(fs * T), endpoint=False)
+
+    t = np.linspace(0, T, int(fs * T), endpoint=False) # Tiempo de muestreo
+
     # Frecuencia instantanea lineal: f(t) = f0 + (f1 - f0) * t / (2 * T)
     chirp = np.sin(2 * np.pi * (f0 + (f1 - f0) * t / (2 * T)) * t)
     return t, chirp
 
+# Función principal para simular un radar acústico usando un chirp y correlación cruzada
 def simular_radar_acustico():
+
     # Parámetros del radar
     fs = 44100              # Frecuencia de muestreo de audio (44.1 kHz)
     f_inicio = 2000         # Frecuencia inicial del chirp (2 kHz)
@@ -26,18 +28,19 @@ def simular_radar_acustico():
     print(f"Distancia simulada: {distancia_real} m")
     print(f"Tiempo de vuelo real esperado (ToF): {tof_real * 1000:.3f} ms")
     
-    # 1. Generar la señal emitida (Chirp)
+    # Generaramos la señal emitida (Chirp)
     t_chirp, emitido = generar_chirp(f_inicio, f_fin, duracion_chirp, fs)
     
-    # 2. Crear buffer de señal recibida (0.025 segundos de escucha)
+    # Creamos buffer de señal recibida (0.025 segundos de escucha)
     duracion_escucha = 0.025
-    t_recibido = np.linspace(0, duracion_escucha, int(fs * duracion_escucha), endpoint=False)
-    recibido = np.zeros_like(t_recibido)
+    t_recibido = np.linspace(0, duracion_escucha, int(fs * duracion_escucha), endpoint=False) # Tiempo de escucha
+    recibido = np.zeros_like(t_recibido) # Buffer de señal recibida (inicialmente vacío)
     
     # Insertar el eco retrasado (ToF) con atenuación
     muestra_retraso = int(tof_real * fs)
     num_muestras_chirp = len(emitido)
-    
+
+    # Asegurarse de que el eco no exceda la longitud del buffer de escucha
     if muestra_retraso + num_muestras_chirp < len(recibido):
         recibido[muestra_retraso : muestra_retraso + num_muestras_chirp] += 0.4 * emitido
         
@@ -45,7 +48,7 @@ def simular_radar_acustico():
     ruido = np.random.normal(0, 0.2, size=len(recibido))
     recibido_con_ruido = recibido + ruido
     
-    # 3. Correlación Cruzada en la Frecuencia (Usando FFT)
+    # Correlación Cruzada en la Frecuencia (Usando FFT)
     # Para la correlación en frecuencia: R_xy = IFFT( FFT(recibido) * conj(FFT(emitido)) )
     N_fft = len(recibido_con_ruido) + len(emitido) - 1
     
@@ -56,7 +59,7 @@ def simular_radar_acustico():
     correlacion_espectral = np.fft.ifft(X_recibido * np.conj(X_emitido))
     correlacion_magnitud = np.abs(correlacion_espectral)
     
-    # 4. Estimación del tiempo y distancia
+    # Estimación del tiempo y distancia
     indice_pico = np.argmax(correlacion_magnitud)
     tof_estimado = indice_pico / fs
     distancia_estimada = (tof_estimado * v_sonido) / 2
@@ -66,7 +69,7 @@ def simular_radar_acustico():
     print(f"Distancia Calculada: {distancia_estimada:.3f} m")
     print(f"Error absoluto: {abs(distancia_estimada - distancia_real) * 100:.2f} cm")
     
-    # --- Graficar resultados ---
+    # Graficar resultados 
     fig, axs = plt.subplots(3, 1, figsize=(10, 8))
     
     # Gráfica 1: Chirp Emitido

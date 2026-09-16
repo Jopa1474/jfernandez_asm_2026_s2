@@ -8,14 +8,14 @@ def analizar_espectro():
     # Parámetros de la señal
     fs = 1000       # Frecuencia de muestreo (1000 Hz)
     N = 256         # Número de puntos (Potencia de 2)
-    t = np.arange(N) / fs
+    t = np.arange(N) / fs 
     
     # Generar señal compuesta: 50 Hz y 120 Hz con diferente amplitud y fase
-    f1, a1 = 50, 1.0
+    f1, a1 = 50, 1.0 
     f2, a2 = 120, 0.5
-    signal = a1 * np.sin(2 * np.pi * f1 * t) + a2 * np.cos(2 * np.pi * f2 * t)
+    signal = a1 * np.sin(2 * np.pi * f1 * t) + a2 * np.cos(2 * np.pi * f2 * t) # Señal compuesta
     
-    # Calcular FFT usando tu función
+    # Calcular FFT 
     X = fft(signal)
     
     # Vector de frecuencias (Dominio de la frecuencia real)
