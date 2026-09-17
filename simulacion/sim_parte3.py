@@ -1,6 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+"""
+Parte 3 del Proyecto
+"""
+
 # Función para generar un chirp lineal que detecta el eco de un objeto a cierta distancia
 def generar_chirp(f0, f1, T, fs):
 

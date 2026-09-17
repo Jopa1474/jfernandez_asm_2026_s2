@@ -1,7 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from sim_parte2 import fft  # Importa tu función FFT limpia
+from sim_parte2 import fft 
 
+"""
+Parte 2: Punto C
+"""
 
 # Función para analizar y graficar el espectro de una señal
 def analizar_espectro():

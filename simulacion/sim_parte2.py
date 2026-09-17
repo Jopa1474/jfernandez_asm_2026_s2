@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 
+"""
+Parte 2: Puntos a y b
+"""
 
 # Implementación de la DFT
 def dft(x):
