@@ -22,22 +22,22 @@ def capturar_ventana():
     """
     raw_buffer = array.array('f', (0.0 for _ in range(N_SAMPLES)))
     
-    # 1. Captura del buffer de tiempo
+    # Captura del buffer de tiempo
     for i in range(N_SAMPLES):
         raw_buffer[i] = float(adc.read_u16())
         utime.sleep_us(DELAY_US)
         
-    # 2. Remover Offset DC (promedio)
+    # Remover Offset DC (promedio)
     mean_val = sum(raw_buffer) / N_SAMPLES
     
-    # 3. Aplicar ventana de Hann
+    # Aplicar ventana de Hann
     windowed_signal = [(raw_buffer[i] - mean_val) * HANN_WINDOW[i] for i in range(N_SAMPLES)]
     
     return windowed_signal
 
-# --- Prueba del Muestreador ---
+# Prueba del Muestreador
 if __name__ == "__main__":
-    print("Probando captura de ventana con filtrado DC + Hann...")
+    print("Probando captura de ventana con filtrado DC + Hann")
     ventana = capturar_ventana()
     print(f"Ventana de {len(ventana)} muestras lista.")
     print("Primeras 5 muestras procesadas:", [round(x, 2) for x in ventana[:5]])
