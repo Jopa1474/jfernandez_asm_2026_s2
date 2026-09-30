@@ -1,15 +1,16 @@
 # hw.py
 # Emisión del chirp y captura del micrófono sincronizadas POR HARDWARE.
 #
-#  - ADC: muestrea solo, a una frecuencia exacta (reloj de 48 MHz / divisor).
+#  - ADC: cada muestra se dispara a un ritmo exacto marcado por hardware.
 #    Un canal DMA copia cada muestra de la FIFO del ADC a la RAM.
 #  - Chirp: una senoidal precalculada. Otro canal DMA escribe el ciclo de
 #    trabajo del PWM en cada período del PWM (~488 kHz): el PWM funciona como
 #    un DAC y el filtro RC deja la senoidal.
-#  - Arranque: dos canales DMA "disparadores" escriben a la vez el START del
-#    ADC y el ENABLE del PWM, activados con UNA sola escritura al registro
-#    MULTI_CHAN_TRIGGER. El chirp empieza siempre en el mismo instante respecto
-#    a la primera muestra: sin delays, sin hilos, sin jitter del intérprete.
+#  - Reloj común: el ADC ya no usa su propio divisor (que arranca en una fase
+#    al azar). Cada muestra la dispara un canal DMA en cada vuelta de otro PWM
+#    (slice 0, a 33 333 Hz exactos). Los dos PWM (chirp y reloj del ADC) se
+#    encienden con UNA sola escritura al registro EN, así que el chirp empieza
+#    siempre en el mismo instante respecto a la primera muestra.
 #
 # Requiere MicroPython 1.23 o superior (módulo rp2.DMA).
 
@@ -33,10 +34,10 @@ _ADC_FCS = _ADC_BASE + 0x08
 _ADC_FIFO = _ADC_BASE + 0x0C
 _ADC_DIV = _ADC_BASE + 0x10
 _DREQ_ADC = 36
-_DMA_MULTI_TRIG = 0x50000430
+_PWM_EN = 0x400500A0                # enciende varios slices a la vez
 
 _CS_EN = 1
-_CS_START_MANY = 1 << 3
+_CS_START_ONCE = 1 << 2
 _CS_READY = 1 << 8
 _AINSEL = (config.PIN_MIC - 26) << 12
 
@@ -49,9 +50,18 @@ _FCS_THRESH_1 = 1 << 24
 # ─── ADC ──────────────────────────────────────────────────────────────
 _adc = ADC(Pin(config.PIN_MIC))     # deja el pin como entrada analógica
 _adc.read_u16()                     # enciende el ADC
-F_ADC_CLK = 48_000_000
-_DIV_INT = int(F_ADC_CLK / config.FS_OBJETIVO + 0.5) - 1
-FS = F_ADC_CLK / (_DIV_INT + 1)     # frecuencia de muestreo EXACTA
+
+# ─── Reloj de muestreo: slice 0 del PWM (sin pin; solo genera la cadencia) ─
+_SL_ADC = 0
+_ADC_PWM_BASE = 0x40050000 + 0x14 * _SL_ADC
+_TOP_ADC = int(machine.freq() / config.FS_OBJETIVO + 0.5) - 1
+FS = machine.freq() / (_TOP_ADC + 1)   # frecuencia de muestreo EXACTA
+_DREQ_RELOJ = 24 + _SL_ADC
+mem32[_ADC_PWM_BASE + 0x00] = 0        # CSR: detenido
+mem32[_ADC_PWM_BASE + 0x04] = 1 << 4   # DIV = 1.0
+mem32[_ADC_PWM_BASE + 0x10] = _TOP_ADC
+mem32[_ADC_PWM_BASE + 0x08] = 0        # CTR
+mem32[_ADC_PWM_BASE + 0x0C] = 0        # CC
 
 # ─── PWM ──────────────────────────────────────────────────────────────
 _pwm = PWM(Pin(config.PIN_PARLANTE))  # pone el pin en función PWM
@@ -79,21 +89,22 @@ F_PWM = machine.freq() / (_TOP + 1)  # ~488 kHz con el reloj de 125 MHz
 def _crear_tabla():
     """
     Chirp lineal senoidal con ventana de Hann, muestreado a F_PWM.
-    ciclo = w(t) · (medio + A·sin(2π(f0·t + ½·k·t²)))
-    La ventana también sube y baja el nivel medio, así no hay "golpe".
+    ciclo = A · w(t) · medio · (1 + sin(2π(f0·t + ½·k·t²)))
+    La ventana sube y baja también el nivel medio. Ese nivel medio produce un
+    "golpe" de baja frecuencia; al escalarlo con A (AMPLITUD), el golpe baja
+    junto con el chirp y no satura el amplificador ni el preamp.
     """
     M = int(F_PWM * config.DURACION_CHIRP_MS / 1000)
     tabla = array.array('I', [0] * (M + 1))
     T = M / F_PWM
     k = (config.F_FIN - config.F_INICIO) / T
     f0 = config.F_INICIO
-    medio = _TOP / 2.0
-    amp = medio * config.AMPLITUD
+    escala = config.AMPLITUD * _TOP / 2.0
     dos_pi = 2.0 * math.pi
     for n in range(M):
         t = n / F_PWM
         w = 0.5 - 0.5 * math.cos(dos_pi * n / (M - 1))
-        d = w * (medio + amp * math.sin(dos_pi * (f0 * t + 0.5 * k * t * t)))
+        d = w * escala * (1.0 + math.sin(dos_pi * (f0 * t + 0.5 * k * t * t)))
         tabla[n] = int(d + 0.5) << _SHIFT
     tabla[M] = 0                    # termina con el PWM en cero
     return tabla
@@ -102,21 +113,20 @@ def _crear_tabla():
 _tabla = _crear_tabla()
 
 # ─── DMA ──────────────────────────────────────────────────────────────
+_EXTRA = 4                          # disparos de sobra: el canal nunca queda ocioso
 _buf = array.array('H', [0] * config.N_CAPTURA)
-_val_start_adc = array.array('I', [_CS_EN | _AINSEL | _CS_START_MANY])
-_val_start_pwm = array.array('I', [1])          # CSR: EN
+_val_start = array.array('I', [_CS_EN | _AINSEL | _CS_START_ONCE])
 
-_dma_adc = rp2.DMA()        # FIFO del ADC -> _buf
-_dma_pwm = rp2.DMA()        # _tabla -> CC del PWM
-_dma_go_adc = rp2.DMA()     # escribe START_MANY en ADC_CS
-_dma_go_pwm = rp2.DMA()     # escribe EN en PWM_CSR
+_dma_adc = rp2.DMA()        # FIFO del ADC -> _buf           (ritmo: ADC listo)
+_dma_start = rp2.DMA()      # START_ONCE -> ADC_CS           (ritmo: reloj slice 0)
+_dma_pwm = rp2.DMA()        # _tabla -> CC del PWM del chirp (ritmo: PWM del chirp)
 
 _ctrl_adc = _dma_adc.pack_ctrl(size=1, inc_read=False, inc_write=True,
                                treq_sel=_DREQ_ADC)
+_ctrl_start = _dma_start.pack_ctrl(size=2, inc_read=False, inc_write=False,
+                                   treq_sel=_DREQ_RELOJ)
 _ctrl_pwm = _dma_pwm.pack_ctrl(size=2, inc_read=True, inc_write=False,
                                treq_sel=_DREQ_PWM)
-_ctrl_go_adc = _dma_go_adc.pack_ctrl(size=2, inc_read=False, inc_write=False)
-_ctrl_go_pwm = _dma_go_pwm.pack_ctrl(size=2, inc_read=False, inc_write=False)
 
 
 def _vaciar_fifo():
@@ -131,46 +141,43 @@ def capturar(con_chirp=True):
     """
     n = config.N_CAPTURA
 
-    # 1) ADC quieto y FIFO vacía
+    # 1) Todo detenido: PWM apagados y en cero, ADC quieto, FIFO vacía
+    mem32[_PWM_EN] = 0
+    mem32[_ADC_PWM_BASE + 0x08] = 0
+    mem32[_PWM_CTR] = 0
+    mem32[_PWM_CC] = 0
+    _dma_start.active(0)
     mem32[_ADC_CS] = _CS_EN | _AINSEL
     while not (mem32[_ADC_CS] & _CS_READY):
         pass
+    mem32[_ADC_DIV] = 0                 # sin divisor propio: lo marca el slice 0
     mem32[_ADC_FCS] = 0
     _vaciar_fifo()
     mem32[_ADC_FCS] = (_FCS_EN | _FCS_DREQ_EN | _FCS_THRESH_1
                        | _FCS_OVER | _FCS_UNDER)
-    mem32[_ADC_DIV] = _DIV_INT << 8
 
-    # 2) PWM detenido, contador en cero
-    mem32[_PWM_CSR] = 0
-    mem32[_PWM_CTR] = 0
-    mem32[_PWM_CC] = 0
-
-    # 3) Canales que esperan su DREQ (quedan listos pero sin transferir)
+    # 2) Armar los canales (esperan su DREQ; con los PWM apagados no hay)
     _dma_adc.config(read=_ADC_FIFO, write=_buf, count=n,
                     ctrl=_ctrl_adc, trigger=True)
-    mascara = 0
-    _dma_go_adc.config(read=_val_start_adc, write=_ADC_CS, count=1,
-                       ctrl=_ctrl_go_adc, trigger=False)
-    mascara |= 1 << _dma_go_adc.channel
+    _dma_start.config(read=_val_start, write=_ADC_CS, count=n + _EXTRA,
+                      ctrl=_ctrl_start, trigger=True)
+    en = 1 << _SL_ADC
     if con_chirp:
         _dma_pwm.config(read=_tabla, write=_PWM_CC, count=len(_tabla),
                         ctrl=_ctrl_pwm, trigger=True)
-        _dma_go_pwm.config(read=_val_start_pwm, write=_PWM_CSR, count=1,
-                           ctrl=_ctrl_go_pwm, trigger=False)
-        mascara |= 1 << _dma_go_pwm.channel
+        en |= 1 << _SLICE
 
-    # 4) Disparo simultáneo de ADC y PWM
-    mem32[_DMA_MULTI_TRIG] = mascara
+    # 3) Arranque simultáneo: una sola escritura enciende los dos PWM
+    mem32[_PWM_EN] = en
 
-    # 5) Esperar a que termine
-    if con_chirp:
-        while _dma_pwm.active():
-            pass
-        mem32[_PWM_CSR] = 0
-        mem32[_PWM_CC] = 0
+    # 4) Esperar a que llegue la última muestra y apagar todo
     while _dma_adc.active():
         pass
+    mem32[_PWM_EN] = 0
+    mem32[_PWM_CC] = 0
+    _dma_start.active(0)
+    if con_chirp:
+        _dma_pwm.active(0)
     mem32[_ADC_CS] = _CS_EN | _AINSEL
     mem32[_ADC_FCS] = 0
     _vaciar_fifo()
@@ -178,8 +185,13 @@ def capturar(con_chirp=True):
 
 
 def apagar():
-    mem32[_PWM_CSR] = 0
+    mem32[_PWM_EN] = 0
     mem32[_PWM_CC] = 0
+
+
+# Una captura de "calentamiento": deja todo en el mismo estado inicial
+# que tendrán todas las capturas siguientes.
+capturar(True)
 
 
 if __name__ == "__main__":

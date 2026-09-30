@@ -110,12 +110,12 @@ def energia_en_banda(xr, xi, fs, f_min, f_max):
 
 
 if __name__ == "__main__":
-    # Prueba en el Pico: espectro de lo que capta el micrófono
-    # (reproduce un tono o el chirp cerca mientras corre).
-    import sampler
+    # Prueba en el Pico: espectro de lo que capta el micrófono, sin chirp
+    # (reproduce un tono cerca mientras corre, o déjalo en silencio).
+    import hw
     import config
-    buf, fs = sampler.capturar()
-    n = 1024
+    buf, fs = hw.capturar(False)
+    n = 512
     media = sum(buf[i] for i in range(n)) / n
     xr = array.array('f', [buf[i] - media for i in range(n)])
     xi = array.array('f', [0.0] * n)
@@ -124,7 +124,7 @@ if __name__ == "__main__":
         xr[i] *= 0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1))
     fft(xr, xi)
     ratio, f_pico = energia_en_banda(xr, xi, fs, config.F_INICIO, config.F_FIN)
-    print("fs real: {:.1f} Hz".format(fs))
+    print("fs: {:.1f} Hz".format(fs))
     print("Frecuencia dominante: {:.0f} Hz".format(f_pico))
     print("Energía en banda {}-{} Hz: {:.1f} %".format(
         config.F_INICIO, config.F_FIN, ratio * 100))
