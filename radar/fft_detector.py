@@ -1,93 +1,130 @@
-import math
-import cmath
+# fft_detector.py
+# FFT radix-2 iterativa (in-place, con bit-reversal), IFFT y análisis espectral.
 
-def fft_radix2_in_place(x_real, x_imag):
-    """
-    FFT Radix-2 optimizada para MicroPython (In-Place / Bit-Reversal)
-    para evitar saturar la memoria RAM con llamadas recursivas.
-    """
-    n = len(x_real)
-    
-    # Reordenamiento por Bit-Reversal
+import math
+import array
+
+import micropython
+
+# Tablas de factores de giro (twiddle factors), calculadas una vez por tamaño N.
+# Son más exactas y rápidas que actualizar w multiplicando en cada paso.
+_tablas = {}
+
+
+def _twiddles(n):
+    if n not in _tablas:
+        mitad = n // 2
+        tw_r = array.array('f', [0.0] * mitad)
+        tw_i = array.array('f', [0.0] * mitad)
+        for k in range(mitad):
+            ang = -2.0 * math.pi * k / n
+            tw_r[k] = math.cos(ang)
+            tw_i[k] = math.sin(ang)
+        _tablas[n] = (tw_r, tw_i)
+    return _tablas[n]
+
+
+@micropython.native
+def _fft_nucleo(xr, xi, tw_r, tw_i, n):
+    # 1) Reordenamiento por inversión de bits
     j = 0
     for i in range(n - 1):
         if i < j:
-            x_real[i], x_real[j] = x_real[j], x_real[i]
-            x_imag[i], x_imag[j] = x_imag[j], x_imag[i]
+            t = xr[i]; xr[i] = xr[j]; xr[j] = t
+            t = xi[i]; xi[i] = xi[j]; xi[j] = t
         k = n >> 1
         while k <= j:
             j -= k
             k >>= 1
         j += k
 
-    # Mariposas Cooleys-Tukey (Iterativo)
-    length = 2
-    while length <= n:
-        half_len = length // 2
-        angle = -2.0 * math.pi / length
-        w_step_real = math.cos(angle)
-        w_step_imag = math.sin(angle)
+    # 2) Mariposas de Cooley-Tukey, etapa por etapa
+    largo = 2
+    while largo <= n:
+        mitad = largo >> 1
+        paso = n // largo            # salto en la tabla de twiddles
+        for inicio in range(0, n, largo):
+            idx_w = 0
+            for k in range(mitad):
+                a = inicio + k
+                b = a + mitad
+                wr = tw_r[idx_w]
+                wi = tw_i[idx_w]
+                ur = xr[b] * wr - xi[b] * wi
+                ui = xr[b] * wi + xi[b] * wr
+                xr[b] = xr[a] - ur
+                xi[b] = xi[a] - ui
+                xr[a] = xr[a] + ur
+                xi[a] = xi[a] + ui
+                idx_w += paso
+        largo <<= 1
 
-        for i in range(0, n, length):
-            w_real = 1.0
-            w_imag = 0.0
-            for k in range(half_len):
-                idx1 = i + k
-                idx2 = idx1 + half_len
 
-                # Multiplicación compleja
-                u_real = x_real[idx2] * w_real - x_imag[idx2] * w_imag
-                u_imag = x_real[idx2] * w_imag + x_imag[idx2] * w_real
+def fft(xr, xi):
+    """FFT in-place. xr, xi: arreglos de largo potencia de 2."""
+    n = len(xr)
+    tw_r, tw_i = _twiddles(n)
+    _fft_nucleo(xr, xi, tw_r, tw_i, n)
 
-                x_real[idx2] = x_real[idx1] - u_real
-                x_imag[idx2] = x_imag[idx1] - u_imag
-                x_real[idx1] += u_real
-                x_imag[idx1] += u_imag
 
-                # Actualizar twiddle factor
-                nxt_real = w_real * w_step_real - w_imag * w_step_imag
-                w_imag = w_real * w_step_imag + w_imag * w_step_real
-                w_real = nxt_real
-
-        length <<= 1
-
-def analizar_espectro(signal, fs=20000, f_min=2000, f_max=8000):
+def ifft(xr, xi):
     """
-    Calcula la magnitud del espectro con FFT y determina si la banda
-    del chirp tiene energía predominante.
+    IFFT in-place reutilizando la FFT:
+    x = conj( FFT( conj(X) ) ) / N
     """
-    N = len(signal)
-    x_real = list(signal)
-    x_imag = [0.0] * N
+    n = len(xr)
+    for i in range(n):
+        xi[i] = -xi[i]
+    fft(xr, xi)
+    inv = 1.0 / n
+    for i in range(n):
+        xr[i] = xr[i] * inv
+        xi[i] = -xi[i] * inv
 
-    # Ejecutar FFT en tiempo real
-    fft_radix2_in_place(x_real, x_imag)
 
-    # Calcular espectro de magnitud (solo primera mitad N/2 por simetría)
-    magnitudes = [math.sqrt(x_real[i]**2 + x_imag[i]**2) for i in range(N // 2)]
+def energia_en_banda(xr, xi, fs, f_min, f_max):
+    """
+    Con el espectro X[k] ya calculado, retorna:
+      - ratio: energía (|X|^2) en la banda [f_min, f_max] / energía total
+      - f_pico: frecuencia con mayor magnitud
+    Solo se usa la primera mitad del espectro (simetría de señales reales)
+    y se omite el bin de DC.
+    """
+    n = len(xr)
+    df = fs / n
+    k_min = int(f_min / df)
+    k_max = int(f_max / df)
+    e_banda = 0.0
+    e_total = 1e-12
+    k_pico = 1
+    p_pico = 0.0
+    for k in range(1, n // 2):
+        p = xr[k] * xr[k] + xi[k] * xi[k]
+        e_total += p
+        if k_min <= k <= k_max:
+            e_banda += p
+        if p > p_pico:
+            p_pico = p
+            k_pico = k
+    return e_banda / e_total, k_pico * df
 
-    # Mapeo de frecuencias a bins
-    bin_min = int(f_min / (fs / N))
-    bin_max = int(f_max / (fs / N))
 
-    # Energía en la banda del chirp vs Energía Total
-    energia_chirp = sum(magnitudes[bin_min:bin_max + 1])
-    energia_total = sum(magnitudes) + 1e-6  # evitar div por cero
-
-    ratio = energia_chirp / energia_total
-
-    # Retorna magnitud, el ratio de energía y un flag si sobrepasa el umbral (ej: 40%)
-    chirp_detectado = ratio > 0.35
-
-    return magnitudes, ratio, chirp_detectado
-
-# Prueba rápida del detector FFT
 if __name__ == "__main__":
-    from sampler import capturar_ventana
-    
-    print("Capturando y analizando espectro con FFT...")
-    ventana = capturar_ventana()
-    mags, ratio, detectado = analizar_espectro(ventana)
-    
-    print(f"Ratio de energía en banda (2-8 kHz): {ratio * 100:.1f}%")
-    print(f"¿Chirp detectado por FFT?: {'SÍ' if detectado else 'NO'}")
+    # Prueba en el Pico: espectro de lo que capta el micrófono
+    # (reproduce un tono o el chirp cerca mientras corre).
+    import sampler
+    import config
+    buf, fs = sampler.capturar()
+    n = 1024
+    media = sum(buf[i] for i in range(n)) / n
+    xr = array.array('f', [buf[i] - media for i in range(n)])
+    xi = array.array('f', [0.0] * n)
+    # Ventana de Hann: solo para el análisis espectral (reduce la fuga espectral)
+    for i in range(n):
+        xr[i] *= 0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1))
+    fft(xr, xi)
+    ratio, f_pico = energia_en_banda(xr, xi, fs, config.F_INICIO, config.F_FIN)
+    print("fs real: {:.1f} Hz".format(fs))
+    print("Frecuencia dominante: {:.0f} Hz".format(f_pico))
+    print("Energía en banda {}-{} Hz: {:.1f} %".format(
+        config.F_INICIO, config.F_FIN, ratio * 100))
